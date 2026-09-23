@@ -1,0 +1,42 @@
+name = "Default Pet"
+author = "Desktop Pet"
+version = "0.1.0"
+
+scale = 1.0
+anchor_x = 48
+anchor_y = 92
+default_facing = "right"
+
+[idle]
+fps = 4
+loop = true
+
+[walk]
+fps = 8
+loop = true
+speed = 90
+
+[dragged]
+fps = 1
+loop = true
+
+[happy]
+fps = 6
+loop = false
+
+[look]
+fps = 4
+loop = false
+
+[fallbacks]
+walk = "idle"
+dragged = "idle"
+happy = "idle"
+look = "idle"
+sleep = "idle"
+wake = "idle"
+sit = "idle"
+stretch = "idle"
+fall = "idle"
+land = "idle"
+special = "idle"
