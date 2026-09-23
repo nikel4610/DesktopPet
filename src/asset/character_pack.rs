@@ -85,6 +85,33 @@ impl CharacterPack {
             ));
         }
 
+        // Only inspect image headers here; pixel data is decoded when a frame is displayed.
+        let first_idle = &motions["idle"].frames[0];
+        let expected_size = image::image_dimensions(first_idle).map_err(|error| {
+            format!(
+                "failed to read dimensions of {}: {error}",
+                first_idle.display()
+            )
+        })?;
+        for (motion_name, motion) in &motions {
+            for frame in &motion.frames {
+                let size = image::image_dimensions(frame).map_err(|error| {
+                    format!("failed to read dimensions of {}: {error}", frame.display())
+                })?;
+                if size != expected_size {
+                    return Err(format!(
+                        "frame {} in motion '{}' is {}x{}; expected {}x{} to match the first idle frame",
+                        frame.display(),
+                        motion_name,
+                        size.0,
+                        size.1,
+                        expected_size.0,
+                        expected_size.1
+                    ));
+                }
+            }
+        }
+
         Ok(Self {
             id,
             root: root.to_path_buf(),
@@ -235,5 +262,42 @@ mod tests {
         let walk = pack.resolve_motion("walk").unwrap();
 
         assert_eq!(walk.frames, idle.frames);
+    }
+
+    #[test]
+    fn rejects_frame_size_mismatch_before_animation() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "desktop-pet-frame-size-{}-{unique}",
+            std::process::id()
+        ));
+        let idle_dir = root.join("idle");
+        let walk_dir = root.join("walk");
+        fs::create_dir_all(&idle_dir).unwrap();
+        fs::create_dir_all(&walk_dir).unwrap();
+        let config = root.join("character.toml");
+        fs::write(&config, "name = \"Size check\"\n").unwrap();
+        let idle_frame = idle_dir.join("0001.png");
+        let walk_frame = walk_dir.join("0001.png");
+        image::RgbaImage::new(16, 16).save(&idle_frame).unwrap();
+        image::RgbaImage::new(16, 16).save(&walk_frame).unwrap();
+        assert!(CharacterPack::load(&root).is_ok());
+
+        image::RgbaImage::new(32, 32).save(&walk_frame).unwrap();
+        let error = CharacterPack::load(&root).unwrap_err();
+        assert!(error.contains("expected 16x16"), "{error}");
+        assert!(error.contains("walk"), "{error}");
+
+        fs::remove_file(walk_frame).unwrap();
+        fs::remove_file(idle_frame).unwrap();
+        fs::remove_file(config).unwrap();
+        fs::remove_dir(walk_dir).unwrap();
+        fs::remove_dir(idle_dir).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }

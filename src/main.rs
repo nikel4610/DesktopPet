@@ -2,6 +2,7 @@
 
 mod animation;
 mod asset;
+mod behavior;
 mod config;
 
 use std::{
@@ -11,7 +12,7 @@ use std::{
     time::Instant,
 };
 
-use animation::Animation;
+use animation::{Animation, Reaction};
 use asset::character_pack::{CharacterPack, default_character_root};
 use image::{
     RgbaImage,
@@ -27,15 +28,16 @@ use windows_sys::Win32::{
     },
     System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
+        Input::KeyboardAndMouse::{GetDoubleClickTime, ReleaseCapture, SetCapture},
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
-            GetMessageW, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, KillTimer, LoadCursorW, MSG,
-            PostQuitMessage, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-            SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
-            UpdateLayeredWindow, WM_CAPTURECHANGED, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MOUSEMOVE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-            WS_POPUP,
+            CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
+            GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
+            IDC_ARROW, KillTimer, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SM_CXDRAG,
+            SM_CYDRAG, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetTimer,
+            SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
+            UpdateLayeredWindow, WM_CAPTURECHANGED, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+            WM_LBUTTONUP, WM_MOUSEMOVE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+            WS_EX_TOPMOST, WS_POPUP,
         },
     },
 };
@@ -49,6 +51,10 @@ const WINDOW_CLASS_NAME: &[u16] = &[
 #[derive(Default)]
 struct DragState {
     active: bool,
+    moved: bool,
+    double_click: bool,
+    start_x: i32,
+    start_y: i32,
     offset_x: i32,
     offset_y: i32,
     width: i32,
@@ -57,6 +63,7 @@ struct DragState {
 
 struct PetState {
     drag: DragState,
+    click_pending: bool,
     animation: Animation,
     scale: f32,
     width: i32,
@@ -64,6 +71,34 @@ struct PetState {
 }
 
 const ANIMATION_TIMER: usize = 1;
+const CLICK_TIMER: usize = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseAction {
+    Click,
+    DoubleClick,
+    Drop,
+}
+
+fn release_action(drag: &DragState) -> ReleaseAction {
+    if drag.moved {
+        ReleaseAction::Drop
+    } else if drag.double_click {
+        ReleaseAction::DoubleClick
+    } else {
+        ReleaseAction::Click
+    }
+}
+
+fn passed_drag_threshold(
+    drag: &DragState,
+    cursor: POINT,
+    threshold_x: i32,
+    threshold_y: i32,
+) -> bool {
+    (i64::from(cursor.x) - i64::from(drag.start_x)).abs() >= i64::from(threshold_x.max(1))
+        || (i64::from(cursor.y) - i64::from(drag.start_y)).abs() >= i64::from(threshold_y.max(1))
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -117,7 +152,7 @@ fn run() -> Result<(), String> {
         }
 
         let window_class = WNDCLASSW {
-            style: 0,
+            style: CS_DBLCLKS,
             lpfnWndProc: Some(window_proc),
             cbClsExtra: 0,
             cbWndExtra: 0,
@@ -154,6 +189,7 @@ fn run() -> Result<(), String> {
 
         let mut state = Box::new(PetState {
             drag: DragState::default(),
+            click_pending: false,
             animation,
             scale: pack.config.scale,
             width,
@@ -366,8 +402,7 @@ fn move_walk(hwnd: HWND, dx: i32) -> Result<bool, String> {
     }
 }
 
-fn resume_after_drag(hwnd: HWND, state: &mut PetState) -> Result<(), String> {
-    state.drag.active = false;
+fn resume_idle(hwnd: HWND, state: &mut PetState) -> Result<(), String> {
     if state.animation.reset_idle(Instant::now()) {
         render_frame(hwnd, state)?;
     }
@@ -375,6 +410,47 @@ fn resume_after_drag(hwnd: HWND, state: &mut PetState) -> Result<(), String> {
         return Err("SetTimer failed".into());
     }
     Ok(())
+}
+
+fn play_reaction(hwnd: HWND, state: &mut PetState, reaction: Reaction) -> Result<(), String> {
+    state.animation.start_reaction(reaction, Instant::now());
+    render_frame(hwnd, state)?;
+    if reaction != Reaction::Dragged
+        && unsafe { SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None) } == 0
+    {
+        return Err("SetTimer failed".into());
+    }
+    Ok(())
+}
+
+fn begin_press(hwnd: HWND, state: &mut PetState, double_click: bool) {
+    let mut cursor: POINT = unsafe { zeroed() };
+    let mut window_rect: RECT = unsafe { zeroed() };
+    if unsafe { GetCursorPos(&mut cursor) } == 0
+        || unsafe { GetWindowRect(hwnd, &mut window_rect) } == 0
+    {
+        return;
+    }
+
+    state.drag = DragState {
+        active: true,
+        moved: false,
+        double_click,
+        start_x: cursor.x,
+        start_y: cursor.y,
+        offset_x: cursor.x - window_rect.left,
+        offset_y: cursor.y - window_rect.top,
+        width: window_rect.right - window_rect.left,
+        height: window_rect.bottom - window_rect.top,
+    };
+    if double_click {
+        state.click_pending = false;
+        unsafe { KillTimer(hwnd, CLICK_TIMER) };
+    }
+    unsafe {
+        KillTimer(hwnd, ANIMATION_TIMER);
+        SetCapture(hwnd);
+    }
 }
 
 fn clamp_rect_to_bounds(rect: &mut RECT, bounds: RECT) {
@@ -437,27 +513,12 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
-        WM_LBUTTONDOWN => {
+        WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
-                let mut cursor: POINT = unsafe { zeroed() };
-                let mut window_rect: RECT = unsafe { zeroed() };
-
-                if unsafe { GetCursorPos(&mut cursor) } != 0
-                    && unsafe { GetWindowRect(hwnd, &mut window_rect) } != 0
-                {
-                    // SAFETY: state points to the PetState owned by run() for the lifetime
-                    // of this window.
-                    let state = unsafe { &mut *state };
-                    state.drag.active = true;
-                    state.drag.offset_x = cursor.x - window_rect.left;
-                    state.drag.offset_y = cursor.y - window_rect.top;
-                    state.drag.width = window_rect.right - window_rect.left;
-                    state.drag.height = window_rect.bottom - window_rect.top;
-
-                    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
-                    unsafe { SetCapture(hwnd) };
-                }
+                // SAFETY: state points to the PetState owned by run() for the lifetime
+                // of this window.
+                begin_press(hwnd, unsafe { &mut *state }, message == WM_LBUTTONDBLCLK);
             }
             0
         }
@@ -471,6 +532,27 @@ unsafe extern "system" fn window_proc(
                 if state.drag.active {
                     let mut cursor: POINT = unsafe { zeroed() };
                     if unsafe { GetCursorPos(&mut cursor) } != 0 {
+                        if !state.drag.moved
+                            && passed_drag_threshold(
+                                &state.drag,
+                                cursor,
+                                unsafe { GetSystemMetrics(SM_CXDRAG) },
+                                unsafe { GetSystemMetrics(SM_CYDRAG) },
+                            )
+                        {
+                            state.drag.moved = true;
+                            state.click_pending = false;
+                            unsafe { KillTimer(hwnd, CLICK_TIMER) };
+                            state
+                                .animation
+                                .start_reaction(Reaction::Dragged, Instant::now());
+                            if let Err(error) = render_frame(hwnd, state) {
+                                eprintln!("Desktop Pet drag frame failed: {error}");
+                            }
+                        }
+                        if !state.drag.moved {
+                            return 0;
+                        }
                         let left = cursor.x - state.drag.offset_x;
                         let top = cursor.y - state.drag.offset_y;
                         let mut target_rect = RECT {
@@ -502,10 +584,28 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
                 let state = unsafe { &mut *state };
-                if state.drag.active
-                    && let Err(error) = resume_after_drag(hwnd, state)
-                {
-                    eprintln!("Desktop Pet animation stopped: {error}");
+                if state.drag.active {
+                    let action = release_action(&state.drag);
+                    state.drag.active = false;
+                    let result = match action {
+                        ReleaseAction::Drop => play_reaction(hwnd, state, Reaction::Fall),
+                        ReleaseAction::DoubleClick => play_reaction(hwnd, state, Reaction::Special),
+                        ReleaseAction::Click => {
+                            state.click_pending = true;
+                            if unsafe {
+                                SetTimer(hwnd, CLICK_TIMER, GetDoubleClickTime().max(1), None)
+                            } == 0
+                            {
+                                state.click_pending = false;
+                                play_reaction(hwnd, state, Reaction::Happy)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    };
+                    if let Err(error) = result {
+                        eprintln!("Desktop Pet interaction stopped: {error}");
+                    }
                 }
             }
             unsafe { ReleaseCapture() };
@@ -515,10 +615,33 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
                 let state = unsafe { &mut *state };
-                if state.drag.active
-                    && let Err(error) = resume_after_drag(hwnd, state)
-                {
-                    eprintln!("Desktop Pet animation stopped: {error}");
+                if state.drag.active {
+                    let moved = state.drag.moved;
+                    state.drag.active = false;
+                    let result = if moved {
+                        play_reaction(hwnd, state, Reaction::Fall)
+                    } else {
+                        resume_idle(hwnd, state)
+                    };
+                    if let Err(error) = result {
+                        eprintln!("Desktop Pet interaction stopped: {error}");
+                    }
+                }
+            }
+            0
+        }
+        WM_TIMER if wparam == CLICK_TIMER => {
+            unsafe { KillTimer(hwnd, CLICK_TIMER) };
+            let state = unsafe { pet_state(hwnd) };
+            if !state.is_null() {
+                let state = unsafe { &mut *state };
+                if state.click_pending {
+                    state.click_pending = false;
+                    if !state.drag.active
+                        && let Err(error) = play_reaction(hwnd, state, Reaction::Happy)
+                    {
+                        eprintln!("Desktop Pet click reaction stopped: {error}");
+                    }
                 }
             }
             0
@@ -527,6 +650,9 @@ unsafe extern "system" fn window_proc(
             let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
                 let state = unsafe { &mut *state };
+                if state.drag.active || state.click_pending {
+                    return 0;
+                }
                 let tick = state.animation.tick(Instant::now());
                 let mut redraw = tick.redraw;
                 let result = (|| -> Result<(), String> {
@@ -555,6 +681,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_DESTROY => {
             unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
+            unsafe { KillTimer(hwnd, CLICK_TIMER) };
             // SAFETY: Posting WM_QUIT does not dereference any caller-provided pointer.
             unsafe { PostQuitMessage(0) };
             0
@@ -569,6 +696,28 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImageView;
+    use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+    #[test]
+    fn click_double_click_and_drag_have_distinct_release_actions() {
+        let mut drag = DragState {
+            active: true,
+            start_x: -100,
+            start_y: 50,
+            ..DragState::default()
+        };
+        let cursor = POINT { x: -97, y: 52 };
+        assert!(!passed_drag_threshold(&drag, cursor, 4, 4));
+        assert_eq!(release_action(&drag), ReleaseAction::Click);
+
+        drag.double_click = true;
+        assert_eq!(release_action(&drag), ReleaseAction::DoubleClick);
+        assert!(passed_drag_threshold(&drag, POINT { x: -96, y: 52 }, 4, 4));
+
+        drag.moved = true;
+        assert_eq!(release_action(&drag), ReleaseAction::Drop);
+    }
 
     #[test]
     fn clamp_rect_keeps_window_inside_monitor_bounds() {
@@ -614,5 +763,64 @@ mod tests {
         assert_eq!(rect.top, -200);
         assert_eq!(rect.right, -1820);
         assert_eq!(rect.bottom, -100);
+    }
+
+    #[test]
+    fn queued_timer_does_not_restart_animation_while_dragging() {
+        let pack = CharacterPack::load(
+            &std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("assets")
+                .join("characters")
+                .join("default"),
+        )
+        .unwrap();
+        let image = image::open(&pack.resolve_motion("idle").unwrap().frames[0]).unwrap();
+        let (width, height) = image.dimensions();
+        let mut state = Box::new(PetState {
+            drag: DragState {
+                active: true,
+                ..DragState::default()
+            },
+            click_pending: false,
+            animation: Animation::new(&pack, Instant::now() - std::time::Duration::from_secs(4))
+                .unwrap(),
+            scale: 1.0,
+            width: width as i32,
+            height: height as i32,
+        });
+
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+                wide_null("STATIC").as_ptr(),
+                wide_null("DesktopPet timer test").as_ptr(),
+                WS_POPUP,
+                200,
+                200,
+                width as i32,
+                height as i32,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            assert!(!hwnd.is_null());
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state as *mut PetState) as isize);
+            window_proc(hwnd, WM_TIMER, ANIMATION_TIMER, 0);
+            let timer_rearmed = KillTimer(hwnd, ANIMATION_TIMER) != 0;
+            let interval = state.animation.interval_ms();
+            state.drag.active = false;
+            state.click_pending = true;
+            window_proc(hwnd, WM_TIMER, ANIMATION_TIMER, 0);
+            let timer_rearmed_while_click_pending = KillTimer(hwnd, ANIMATION_TIMER) != 0;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            DestroyWindow(hwnd);
+            assert_eq!(interval, 3000);
+            assert!(
+                !timer_rearmed,
+                "queued WM_TIMER rearmed animation during drag"
+            );
+            assert!(!timer_rearmed_while_click_pending);
+        }
     }
 }
