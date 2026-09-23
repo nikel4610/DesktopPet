@@ -1,0 +1,7 @@
+[plugins."ponytail@ponytail"]
+enabled = true
+
+[mcp_servers.serena]
+command = "serena"
+args = ["start-mcp-server", "--project-from-cwd", "--context=codex"]
+startup_timeout_sec = 15
