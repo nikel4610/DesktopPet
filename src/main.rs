@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod animation;
 mod asset;
 mod config;
 
@@ -7,12 +8,14 @@ use std::{
     ffi::c_void,
     mem::{size_of, zeroed},
     ptr::{null, null_mut},
+    time::Instant,
 };
 
+use animation::Animation;
 use asset::character_pack::{CharacterPack, default_character_root};
 use image::{
     RgbaImage,
-    imageops::{FilterType, resize},
+    imageops::{FilterType, flip_horizontal_in_place, resize},
 };
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
@@ -27,11 +30,12 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{ReleaseCapture, SetCapture},
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
-            GetMessageW, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, LoadCursorW, MSG,
+            GetMessageW, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, KillTimer, LoadCursorW, MSG,
             PostQuitMessage, RegisterClassW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-            SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
+            SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
             UpdateLayeredWindow, WM_CAPTURECHANGED, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MOUSEMOVE, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            WM_MOUSEMOVE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+            WS_POPUP,
         },
     },
 };
@@ -51,6 +55,16 @@ struct DragState {
     height: i32,
 }
 
+struct PetState {
+    drag: DragState,
+    animation: Animation,
+    scale: f32,
+    width: i32,
+    height: i32,
+}
+
+const ANIMATION_TIMER: usize = 1;
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("Desktop Pet startup failed: {error}");
@@ -60,6 +74,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let character_root = default_character_root()?;
     let pack = CharacterPack::load_first(&character_root)?;
+    let animation = Animation::new(&pack, Instant::now())?;
     let idle = pack.resolve_motion("idle")?;
     let first_frame = idle
         .frames
@@ -137,16 +152,21 @@ fn run() -> Result<(), String> {
             return Err("CreateWindowExW failed".into());
         }
 
-        let mut drag_state = Box::new(DragState::default());
-        SetWindowLongPtrW(
-            hwnd,
-            GWLP_USERDATA,
-            (&mut *drag_state as *mut DragState) as isize,
-        );
+        let mut state = Box::new(PetState {
+            drag: DragState::default(),
+            animation,
+            scale: pack.config.scale,
+            width,
+            height,
+        });
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state as *mut PetState) as isize);
 
         update_layered_window(hwnd, image.as_raw(), width, height)?;
 
         ShowWindow(hwnd, SW_SHOW);
+        if SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None) == 0 {
+            return Err("SetTimer failed".into());
+        }
 
         let mut message: MSG = zeroed();
         loop {
@@ -267,6 +287,7 @@ fn update_layered_window(hwnd: HWND, rgba: &[u8], width: i32, height: i32) -> Re
             AlphaFormat: AC_SRC_ALPHA as u8,
         };
 
+        // A zero-alpha pixel is also transparent to mouse hit testing on a layered window.
         let updated = UpdateLayeredWindow(
             hwnd,
             screen_dc,
@@ -290,6 +311,70 @@ fn update_layered_window(hwnd: HWND, rgba: &[u8], width: i32, height: i32) -> Re
 
         Ok(())
     }
+}
+
+fn render_frame(hwnd: HWND, state: &PetState) -> Result<(), String> {
+    let frame = state.animation.frame();
+    let image = image::open(frame)
+        .map_err(|error| format!("failed to decode {}: {error}", frame.display()))?
+        .to_rgba8();
+    let mut image = scale_image(image, state.scale)?;
+    if image.width() != state.width as u32 || image.height() != state.height as u32 {
+        return Err(format!(
+            "frame size differs from first idle frame: {}",
+            frame.display()
+        ));
+    }
+    if state.animation.should_flip() {
+        flip_horizontal_in_place(&mut image);
+    }
+    update_layered_window(hwnd, image.as_raw(), state.width, state.height)
+}
+
+fn move_walk(hwnd: HWND, dx: i32) -> Result<bool, String> {
+    unsafe {
+        let mut rect: RECT = zeroed();
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return Err("GetWindowRect failed".into());
+        }
+        let center = POINT {
+            x: rect.left + (rect.right - rect.left) / 2,
+            y: rect.top + (rect.bottom - rect.top) / 2,
+        };
+        let monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if monitor.is_null() || GetMonitorInfoW(monitor, &mut info) == 0 {
+            return Err("GetMonitorInfoW failed".into());
+        }
+        let max_left = (info.rcMonitor.right - (rect.right - rect.left)).max(info.rcMonitor.left);
+        let wanted = rect.left.saturating_add(dx);
+        let left = wanted.clamp(info.rcMonitor.left, max_left);
+        if SetWindowPos(
+            hwnd,
+            null_mut(),
+            left,
+            rect.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        ) == 0
+        {
+            return Err("SetWindowPos failed".into());
+        }
+        Ok(wanted != left)
+    }
+}
+
+fn resume_after_drag(hwnd: HWND, state: &mut PetState) -> Result<(), String> {
+    state.drag.active = false;
+    if state.animation.reset_idle(Instant::now()) {
+        render_frame(hwnd, state)?;
+    }
+    if unsafe { SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None) } == 0 {
+        return Err("SetTimer failed".into());
+    }
+    Ok(())
 }
 
 fn clamp_rect_to_bounds(rect: &mut RECT, bounds: RECT) {
@@ -339,10 +424,10 @@ fn clamp_rect_to_cursor_monitor(rect: &mut RECT, cursor: POINT) {
     }
 }
 
-unsafe fn drag_state(hwnd: HWND) -> *mut DragState {
-    // SAFETY: GWLP_USERDATA is initialized with a DragState pointer immediately after
+unsafe fn pet_state(hwnd: HWND) -> *mut PetState {
+    // SAFETY: GWLP_USERDATA is initialized with a PetState pointer immediately after
     // CreateWindowExW succeeds and the Box remains alive for the whole message loop.
-    unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DragState }
+    unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PetState }
 }
 
 unsafe extern "system" fn window_proc(
@@ -353,7 +438,7 @@ unsafe extern "system" fn window_proc(
 ) -> LRESULT {
     match message {
         WM_LBUTTONDOWN => {
-            let state = unsafe { drag_state(hwnd) };
+            let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
                 let mut cursor: POINT = unsafe { zeroed() };
                 let mut window_rect: RECT = unsafe { zeroed() };
@@ -361,37 +446,38 @@ unsafe extern "system" fn window_proc(
                 if unsafe { GetCursorPos(&mut cursor) } != 0
                     && unsafe { GetWindowRect(hwnd, &mut window_rect) } != 0
                 {
-                    // SAFETY: state points to the DragState owned by run() for the lifetime
+                    // SAFETY: state points to the PetState owned by run() for the lifetime
                     // of this window.
                     let state = unsafe { &mut *state };
-                    state.active = true;
-                    state.offset_x = cursor.x - window_rect.left;
-                    state.offset_y = cursor.y - window_rect.top;
-                    state.width = window_rect.right - window_rect.left;
-                    state.height = window_rect.bottom - window_rect.top;
+                    state.drag.active = true;
+                    state.drag.offset_x = cursor.x - window_rect.left;
+                    state.drag.offset_y = cursor.y - window_rect.top;
+                    state.drag.width = window_rect.right - window_rect.left;
+                    state.drag.height = window_rect.bottom - window_rect.top;
 
+                    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
                     unsafe { SetCapture(hwnd) };
                 }
             }
             0
         }
         WM_MOUSEMOVE => {
-            let state = unsafe { drag_state(hwnd) };
+            let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
-                // SAFETY: state points to the DragState owned by run() for the lifetime
+                // SAFETY: state points to the PetState owned by run() for the lifetime
                 // of this window.
                 let state = unsafe { &mut *state };
 
-                if state.active {
+                if state.drag.active {
                     let mut cursor: POINT = unsafe { zeroed() };
                     if unsafe { GetCursorPos(&mut cursor) } != 0 {
-                        let left = cursor.x - state.offset_x;
-                        let top = cursor.y - state.offset_y;
+                        let left = cursor.x - state.drag.offset_x;
+                        let top = cursor.y - state.drag.offset_y;
                         let mut target_rect = RECT {
                             left,
                             top,
-                            right: left + state.width,
-                            bottom: top + state.height,
+                            right: left + state.drag.width,
+                            bottom: top + state.drag.height,
                         };
 
                         clamp_rect_to_cursor_monitor(&mut target_rect, cursor);
@@ -413,25 +499,62 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_LBUTTONUP => {
-            let state = unsafe { drag_state(hwnd) };
+            let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
-                // SAFETY: state points to the DragState owned by run() for the lifetime
-                // of this window.
-                unsafe { (*state).active = false };
+                let state = unsafe { &mut *state };
+                if state.drag.active
+                    && let Err(error) = resume_after_drag(hwnd, state)
+                {
+                    eprintln!("Desktop Pet animation stopped: {error}");
+                }
             }
             unsafe { ReleaseCapture() };
             0
         }
         WM_CAPTURECHANGED => {
-            let state = unsafe { drag_state(hwnd) };
+            let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
-                // SAFETY: state points to the DragState owned by run() for the lifetime
-                // of this window.
-                unsafe { (*state).active = false };
+                let state = unsafe { &mut *state };
+                if state.drag.active
+                    && let Err(error) = resume_after_drag(hwnd, state)
+                {
+                    eprintln!("Desktop Pet animation stopped: {error}");
+                }
+            }
+            0
+        }
+        WM_TIMER if wparam == ANIMATION_TIMER => {
+            let state = unsafe { pet_state(hwnd) };
+            if !state.is_null() {
+                let state = unsafe { &mut *state };
+                let tick = state.animation.tick(Instant::now());
+                let mut redraw = tick.redraw;
+                let result = (|| -> Result<(), String> {
+                    if tick.dx != 0 && move_walk(hwnd, tick.dx)? {
+                        state.animation.reverse();
+                        redraw = true;
+                    }
+                    if redraw {
+                        render_frame(hwnd, state)?;
+                    }
+                    if tick.mode_changed
+                        && unsafe {
+                            SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None)
+                        } == 0
+                    {
+                        return Err("SetTimer failed".into());
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result {
+                    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
+                    eprintln!("Desktop Pet animation stopped: {error}");
+                }
             }
             0
         }
         WM_DESTROY => {
+            unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
             // SAFETY: Posting WM_QUIT does not dereference any caller-provided pointer.
             unsafe { PostQuitMessage(0) };
             0

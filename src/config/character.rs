@@ -7,7 +7,7 @@ pub const MOTION_NAMES: [&str; 12] = [
     "special",
 ];
 
-#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Facing {
     Left,
