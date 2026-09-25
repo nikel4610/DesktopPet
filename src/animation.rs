@@ -57,6 +57,13 @@ impl Animation {
         let walk = pack.resolve_motion("walk")?;
         let reaction_motion = |name| -> Result<Motion, String> {
             let assets = pack.resolve_motion(name)?;
+            if matches!(name, "fall" | "land") && assets.frames == idle.frames {
+                return Ok(Motion {
+                    frames: vec![idle.frames[0].clone()],
+                    fps: 4,
+                    looped: false,
+                });
+            }
             Ok(Motion {
                 frames: assets.frames.clone(),
                 fps: assets.config.fps,
@@ -362,18 +369,26 @@ mod tests {
         let seed = (1..10_000)
             .find(|seed| {
                 let mut behavior = Behavior::with_seed(now, *seed);
-                behavior.tick(now + Duration::from_secs(3));
+                behavior.tick(now + Duration::from_millis(4500));
                 behavior.mode() == Mode::Walk
-                    && behavior.tick(now + Duration::from_secs(5))
+                    && behavior.tick(now + Duration::from_millis(6500))
                     && behavior.mode() == Mode::Idle
             })
             .unwrap();
         let mut animation = test_animation(now, seed);
-        assert_eq!(animation.interval_ms(), 3000);
-        assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
+        assert_eq!(animation.interval_ms(), 4500);
+        assert!(
+            animation
+                .tick(now + Duration::from_millis(4500))
+                .mode_changed
+        );
         assert_eq!(animation.frame(), Path::new("walk"));
-        assert_ne!(animation.tick(now + Duration::from_millis(3100)).dx, 0);
-        assert!(animation.tick(now + Duration::from_secs(5)).mode_changed);
+        assert_ne!(animation.tick(now + Duration::from_millis(4600)).dx, 0);
+        assert!(
+            animation
+                .tick(now + Duration::from_millis(6500))
+                .mode_changed
+        );
         assert_eq!(animation.frame(), Path::new("idle"));
     }
 
@@ -384,14 +399,18 @@ mod tests {
             let seed = (1..10_000)
                 .find(|seed| {
                     let mut behavior = Behavior::with_seed(now, *seed);
-                    behavior.tick(now + Duration::from_secs(3));
+                    behavior.tick(now + Duration::from_millis(4500));
                     behavior.mode() == Mode::Walk && behavior.walk_right() == right
                 })
                 .unwrap();
             let mut animation = test_animation(now, seed);
-            assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
+            assert!(
+                animation
+                    .tick(now + Duration::from_millis(4500))
+                    .mode_changed
+            );
             assert_eq!(animation.should_flip(), !right);
-            let dx = animation.tick(now + Duration::from_millis(3100)).dx;
+            let dx = animation.tick(now + Duration::from_millis(4600)).dx;
             assert_eq!(dx.signum(), if right { 1 } else { -1 });
         }
     }
@@ -402,20 +421,24 @@ mod tests {
         let seed = (1..10_000)
             .find(|seed| {
                 let mut behavior = Behavior::with_seed(now, *seed);
-                behavior.tick(now + Duration::from_secs(3));
+                behavior.tick(now + Duration::from_millis(4500));
                 behavior.mode() == Mode::Walk
             })
             .unwrap();
         let mut animation = test_animation(now, seed);
-        assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
+        assert!(
+            animation
+                .tick(now + Duration::from_millis(4500))
+                .mode_changed
+        );
         let chosen_distance = animation.walk_remaining;
         assert!((63..=153).contains(&chosen_distance));
 
-        let arrival = animation.tick(now + Duration::from_millis(4900));
+        let arrival = animation.tick(now + Duration::from_millis(6400));
         assert!(arrival.mode_changed);
         assert_eq!(arrival.dx.abs(), chosen_distance);
         assert_eq!(animation.frame(), Path::new("idle"));
-        assert_eq!(animation.tick(now + Duration::from_secs(5)).dx, 0);
+        assert_eq!(animation.tick(now + Duration::from_millis(6500)).dx, 0);
     }
 
     #[test]
@@ -424,7 +447,7 @@ mod tests {
         let seed = (1..10_000)
             .find(|seed| {
                 let mut behavior = Behavior::with_seed(now, *seed);
-                behavior.tick(now + Duration::from_secs(3));
+                behavior.tick(now + Duration::from_millis(4500));
                 behavior.mode() == Mode::Walk
             })
             .unwrap();
@@ -435,13 +458,17 @@ mod tests {
             looped: true,
         };
 
-        assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
+        assert!(
+            animation
+                .tick(now + Duration::from_millis(4500))
+                .mode_changed
+        );
         assert_eq!(animation.frame(), Path::new("walk-0"));
-        let first_step = animation.tick(now + Duration::from_millis(3125));
+        let first_step = animation.tick(now + Duration::from_millis(4625));
         assert!(first_step.dx != 0);
         assert!(first_step.redraw);
         assert_eq!(animation.frame(), Path::new("walk-1"));
-        assert!(animation.tick(now + Duration::from_millis(3250)).redraw);
+        assert!(animation.tick(now + Duration::from_millis(4750)).redraw);
         assert_eq!(animation.frame(), Path::new("walk-2"));
     }
 
@@ -451,12 +478,12 @@ mod tests {
         let seed = (1..10_000)
             .find(|seed| {
                 let mut behavior = Behavior::with_seed(now, *seed);
-                behavior.tick(now + Duration::from_secs(3));
+                behavior.tick(now + Duration::from_millis(4500));
                 behavior.mode() == Mode::Walk && behavior.walk_right()
             })
             .unwrap();
         let mut animation = test_animation(now, seed);
-        let started = now + Duration::from_secs(3);
+        let started = now + Duration::from_millis(4500);
         assert!(animation.tick(started).mode_changed);
         assert!(!animation.plan_walk(300, 4, started));
         assert!(animation.should_flip());
@@ -469,12 +496,12 @@ mod tests {
         let seed = (1..10_000)
             .find(|seed| {
                 let mut behavior = Behavior::with_seed(now, *seed);
-                behavior.tick(now + Duration::from_secs(3));
+                behavior.tick(now + Duration::from_millis(4500));
                 behavior.mode() == Mode::Walk
             })
             .unwrap();
         let mut animation = test_animation(now, seed);
-        let started = now + Duration::from_secs(3);
+        let started = now + Duration::from_millis(4500);
         assert!(animation.tick(started).mode_changed);
         assert!(animation.plan_walk(0, 0, started));
         assert!(!animation.is_walking());
@@ -487,7 +514,7 @@ mod tests {
         let seed = (1..1000)
             .find(|seed| {
                 let mut behavior = Behavior::with_seed(now, *seed);
-                !behavior.tick(now + Duration::from_secs(3)) && behavior.mode() == Mode::Idle
+                !behavior.tick(now + Duration::from_millis(4500)) && behavior.mode() == Mode::Idle
             })
             .unwrap();
         let mut animation = test_animation(now, seed);
@@ -496,7 +523,11 @@ mod tests {
             fps: 1,
             looped: true,
         };
-        assert!(!animation.tick(now + Duration::from_secs(3)).mode_changed);
+        assert!(
+            !animation
+                .tick(now + Duration::from_millis(5500))
+                .mode_changed
+        );
         assert_eq!(animation.frame(), Path::new("idle-1"));
     }
 

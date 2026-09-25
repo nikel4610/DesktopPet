@@ -847,7 +847,7 @@ mod tests {
             let timer_rearmed_while_click_pending = KillTimer(hwnd, ANIMATION_TIMER) != 0;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             DestroyWindow(hwnd);
-            assert_eq!(interval, 3000);
+            assert_eq!(interval, 4500);
             assert!(
                 !timer_rearmed,
                 "queued WM_TIMER rearmed animation during drag"

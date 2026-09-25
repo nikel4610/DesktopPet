@@ -1,9 +1,9 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const IDLE_DECISION_INTERVAL: Duration = Duration::from_secs(3);
+const IDLE_DECISION_INTERVAL: Duration = Duration::from_millis(4500);
 const WALK_DECISION_INTERVAL: Duration = Duration::from_secs(2);
-const MIN_IDLE_PAUSE_MS: u64 = 1800;
-const IDLE_PAUSE_STEP_MS: u64 = 26;
+const MIN_IDLE_PAUSE_MS: u64 = 2700;
+const IDLE_PAUSE_STEP_MS: u64 = 39;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -161,7 +161,7 @@ mod tests {
         behavior.reset_after_interaction(released);
         assert_eq!(behavior.mode(), Mode::Idle);
         let pause = behavior.decision_interval();
-        assert!((1800..=4374).contains(&pause.as_millis()));
+        assert!((2700..=6561).contains(&pause.as_millis()));
         assert!(!behavior.tick(released + pause - Duration::from_millis(1)));
     }
 
@@ -178,7 +178,7 @@ mod tests {
         assert!(
             pauses
                 .iter()
-                .all(|pause| (1800..=4374).contains(&pause.as_millis()))
+                .all(|pause| (2700..=6561).contains(&pause.as_millis()))
         );
     }
 }
