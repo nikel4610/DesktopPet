@@ -42,6 +42,7 @@ pub struct Animation {
     last_tick: Instant,
     frame_index: usize,
     subpixel: f32,
+    walk_remaining: i32,
 }
 
 pub struct Tick {
@@ -88,6 +89,7 @@ impl Animation {
             last_tick: now,
             frame_index: 0,
             subpixel: 0.0,
+            walk_remaining: 0,
         })
     }
 
@@ -122,6 +124,54 @@ impl Animation {
         };
     }
 
+    pub fn is_walking(&self) -> bool {
+        self.reaction.is_none() && self.behavior.mode() == Mode::Walk
+    }
+
+    pub fn plan_walk(&mut self, left_room: i32, right_room: i32, now: Instant) -> bool {
+        if !self.is_walking() {
+            return false;
+        }
+        let left_room = left_room.max(0);
+        let right_room = right_room.max(0);
+        let preferred_room = if self.facing == Facing::Right {
+            right_room
+        } else {
+            left_room
+        };
+        let opposite_room = if self.facing == Facing::Right {
+            left_room
+        } else {
+            right_room
+        };
+        if preferred_room < self.walk_remaining.min(48) && opposite_room > preferred_room {
+            self.reverse();
+        }
+        let available_room = if self.facing == Facing::Right {
+            right_room
+        } else {
+            left_room
+        };
+        self.walk_remaining = self.walk_remaining.min(available_room);
+        if self.walk_remaining == 0 {
+            self.stop_walk(now);
+            return true;
+        }
+        false
+    }
+
+    pub fn stop_walk(&mut self, now: Instant) {
+        if !self.is_walking() {
+            return;
+        }
+        self.behavior.finish_walk(now);
+        self.mode_started = now;
+        self.frame_index = 0;
+        self.subpixel = 0.0;
+        self.walk_remaining = 0;
+        self.last_tick = now;
+    }
+
     pub fn reset_idle(&mut self, now: Instant) -> bool {
         let redraw = self.frame() != self.idle.frames[0];
         self.reaction = None;
@@ -130,6 +180,7 @@ impl Animation {
         self.last_tick = now;
         self.frame_index = 0;
         self.subpixel = 0.0;
+        self.walk_remaining = 0;
         redraw
     }
 
@@ -141,6 +192,7 @@ impl Animation {
         self.last_tick = now;
         self.frame_index = 0;
         self.subpixel = 0.0;
+        self.walk_remaining = 0;
     }
 
     pub fn interval_ms(&self) -> u32 {
@@ -196,6 +248,19 @@ impl Animation {
             self.mode_started = now;
             self.frame_index = 0;
             self.subpixel = 0.0;
+            if self.behavior.mode() == Mode::Walk {
+                self.facing = if self.behavior.walk_right() {
+                    Facing::Right
+                } else {
+                    Facing::Left
+                };
+                self.walk_remaining = (self.walk_speed
+                    * self.behavior.walk_duration().as_secs_f32())
+                .round()
+                .max(1.0) as i32;
+            } else {
+                self.walk_remaining = 0;
+            }
         }
 
         let elapsed = now.duration_since(self.mode_started);
@@ -214,11 +279,21 @@ impl Animation {
                 self.walk_speed * now.duration_since(self.last_tick).as_secs_f32() + self.subpixel;
             let pixels = distance.floor() as i32;
             self.subpixel = distance - pixels as f32;
+            let pixels = pixels.min(self.walk_remaining);
+            self.walk_remaining -= pixels;
             dx = if self.facing == Facing::Right {
                 pixels
             } else {
                 -pixels
             };
+            if self.walk_remaining == 0 {
+                self.stop_walk(now);
+                return Tick {
+                    dx,
+                    redraw: true,
+                    mode_changed: true,
+                };
+            }
         }
         self.last_tick = now;
         Tick {
@@ -269,6 +344,7 @@ mod tests {
             last_tick: now,
             frame_index: 0,
             subpixel: 0.0,
+            walk_remaining: 0,
         }
     }
 
@@ -296,8 +372,112 @@ mod tests {
         assert_eq!(animation.interval_ms(), 3000);
         assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
         assert_eq!(animation.frame(), Path::new("walk"));
-        assert!(animation.tick(now + Duration::from_millis(3100)).dx > 0);
+        assert_ne!(animation.tick(now + Duration::from_millis(3100)).dx, 0);
         assert!(animation.tick(now + Duration::from_secs(5)).mode_changed);
+        assert_eq!(animation.frame(), Path::new("idle"));
+    }
+
+    #[test]
+    fn each_walk_can_face_either_direction() {
+        let now = Instant::now();
+        for right in [false, true] {
+            let seed = (1..10_000)
+                .find(|seed| {
+                    let mut behavior = Behavior::with_seed(now, *seed);
+                    behavior.tick(now + Duration::from_secs(3));
+                    behavior.mode() == Mode::Walk && behavior.walk_right() == right
+                })
+                .unwrap();
+            let mut animation = test_animation(now, seed);
+            assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
+            assert_eq!(animation.should_flip(), !right);
+            let dx = animation.tick(now + Duration::from_millis(3100)).dx;
+            assert_eq!(dx.signum(), if right { 1 } else { -1 });
+        }
+    }
+
+    #[test]
+    fn walk_stops_at_its_chosen_distance_without_overshooting() {
+        let now = Instant::now();
+        let seed = (1..10_000)
+            .find(|seed| {
+                let mut behavior = Behavior::with_seed(now, *seed);
+                behavior.tick(now + Duration::from_secs(3));
+                behavior.mode() == Mode::Walk
+            })
+            .unwrap();
+        let mut animation = test_animation(now, seed);
+        assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
+        let chosen_distance = animation.walk_remaining;
+        assert!((63..=153).contains(&chosen_distance));
+
+        let arrival = animation.tick(now + Duration::from_millis(4900));
+        assert!(arrival.mode_changed);
+        assert_eq!(arrival.dx.abs(), chosen_distance);
+        assert_eq!(animation.frame(), Path::new("idle"));
+        assert_eq!(animation.tick(now + Duration::from_secs(5)).dx, 0);
+    }
+
+    #[test]
+    fn walk_replays_its_distinct_sprite_frames_while_moving() {
+        let now = Instant::now();
+        let seed = (1..10_000)
+            .find(|seed| {
+                let mut behavior = Behavior::with_seed(now, *seed);
+                behavior.tick(now + Duration::from_secs(3));
+                behavior.mode() == Mode::Walk
+            })
+            .unwrap();
+        let mut animation = test_animation(now, seed);
+        animation.walk = Motion {
+            frames: (0..4).map(|index| format!("walk-{index}").into()).collect(),
+            fps: 8,
+            looped: true,
+        };
+
+        assert!(animation.tick(now + Duration::from_secs(3)).mode_changed);
+        assert_eq!(animation.frame(), Path::new("walk-0"));
+        let first_step = animation.tick(now + Duration::from_millis(3125));
+        assert!(first_step.dx != 0);
+        assert!(first_step.redraw);
+        assert_eq!(animation.frame(), Path::new("walk-1"));
+        assert!(animation.tick(now + Duration::from_millis(3250)).redraw);
+        assert_eq!(animation.frame(), Path::new("walk-2"));
+    }
+
+    #[test]
+    fn walk_plans_away_from_a_nearby_edge() {
+        let now = Instant::now();
+        let seed = (1..10_000)
+            .find(|seed| {
+                let mut behavior = Behavior::with_seed(now, *seed);
+                behavior.tick(now + Duration::from_secs(3));
+                behavior.mode() == Mode::Walk && behavior.walk_right()
+            })
+            .unwrap();
+        let mut animation = test_animation(now, seed);
+        let started = now + Duration::from_secs(3);
+        assert!(animation.tick(started).mode_changed);
+        assert!(!animation.plan_walk(300, 4, started));
+        assert!(animation.should_flip());
+        assert!(animation.tick(started + Duration::from_millis(100)).dx < 0);
+    }
+
+    #[test]
+    fn walk_without_available_room_returns_to_idle() {
+        let now = Instant::now();
+        let seed = (1..10_000)
+            .find(|seed| {
+                let mut behavior = Behavior::with_seed(now, *seed);
+                behavior.tick(now + Duration::from_secs(3));
+                behavior.mode() == Mode::Walk
+            })
+            .unwrap();
+        let mut animation = test_animation(now, seed);
+        let started = now + Duration::from_secs(3);
+        assert!(animation.tick(started).mode_changed);
+        assert!(animation.plan_walk(0, 0, started));
+        assert!(!animation.is_walking());
         assert_eq!(animation.frame(), Path::new("idle"));
     }
 

@@ -45,6 +45,6 @@ cargo run --release
 
 `src/`에 Win32 창, 입력 처리, 애니메이션, 캐릭터 설정·에셋 로더가 있습니다. `assets/characters/`는 캐릭터 데이터, `docs/`는 제작 안내입니다. 프로젝트 작업 기준은 [AGENTS.md](AGENTS.md)에 있습니다.
 
-Codex에서 사용하는 선택적 프로젝트 설정은 `.codex/config.toml`에 있습니다. Ponytail 플러그인과 Serena 실행 파일은 각 개발 환경에 별도로 설치해야 합니다. Serena 프로젝트 설정은 `.serena/project.yml`에 있습니다. Codex가 프로젝트 설정을 읽으려면 이 저장소를 신뢰한 프로젝트로 열어야 합니다. 이 도구들은 프로그램 실행에 필요하지 않습니다.
+Codex에서 사용하는 선택적 프로젝트 설정은 `.codex/config.toml`에 있습니다. Ponytail 플러그인은 개발 환경에 별도로 설치해야 합니다. Codex가 프로젝트 설정을 읽으려면 이 저장소를 신뢰한 프로젝트로 열어야 합니다. 이 도구는 프로그램 실행에 필요하지 않습니다.
 
 작업 기록은 저장소의 별도 devlog 대신 Obsidian Vault의 일일 로그에 남깁니다.

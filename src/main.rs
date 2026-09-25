@@ -367,7 +367,14 @@ fn render_frame(hwnd: HWND, state: &PetState) -> Result<(), String> {
     update_layered_window(hwnd, image.as_raw(), state.width, state.height)
 }
 
-fn move_walk(hwnd: HWND, dx: i32) -> Result<bool, String> {
+struct HorizontalWalkBounds {
+    left: i32,
+    top: i32,
+    min_left: i32,
+    max_left: i32,
+}
+
+fn horizontal_walk_bounds(hwnd: HWND) -> Result<HorizontalWalkBounds, String> {
     unsafe {
         let mut rect: RECT = zeroed();
         if GetWindowRect(hwnd, &mut rect) == 0 {
@@ -384,13 +391,25 @@ fn move_walk(hwnd: HWND, dx: i32) -> Result<bool, String> {
             return Err("GetMonitorInfoW failed".into());
         }
         let max_left = (info.rcMonitor.right - (rect.right - rect.left)).max(info.rcMonitor.left);
-        let wanted = rect.left.saturating_add(dx);
-        let left = wanted.clamp(info.rcMonitor.left, max_left);
+        Ok(HorizontalWalkBounds {
+            left: rect.left,
+            top: rect.top,
+            min_left: info.rcMonitor.left,
+            max_left,
+        })
+    }
+}
+
+fn move_walk(hwnd: HWND, dx: i32) -> Result<bool, String> {
+    let bounds = horizontal_walk_bounds(hwnd)?;
+    let wanted = bounds.left.saturating_add(dx);
+    let left = wanted.clamp(bounds.min_left, bounds.max_left);
+    unsafe {
         if SetWindowPos(
             hwnd,
             null_mut(),
             left,
-            rect.top,
+            bounds.top,
             0,
             0,
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
@@ -653,17 +672,30 @@ unsafe extern "system" fn window_proc(
                 if state.drag.active || state.click_pending {
                     return 0;
                 }
-                let tick = state.animation.tick(Instant::now());
+                let now = Instant::now();
+                let tick = state.animation.tick(now);
                 let mut redraw = tick.redraw;
+                let mut mode_changed = tick.mode_changed;
                 let result = (|| -> Result<(), String> {
+                    if mode_changed && state.animation.is_walking() {
+                        let bounds = horizontal_walk_bounds(hwnd)?;
+                        if state.animation.plan_walk(
+                            bounds.left.saturating_sub(bounds.min_left),
+                            bounds.max_left.saturating_sub(bounds.left),
+                            now,
+                        ) {
+                            redraw = true;
+                        }
+                    }
                     if tick.dx != 0 && move_walk(hwnd, tick.dx)? {
-                        state.animation.reverse();
+                        state.animation.stop_walk(now);
                         redraw = true;
+                        mode_changed = true;
                     }
                     if redraw {
                         render_frame(hwnd, state)?;
                     }
-                    if tick.mode_changed
+                    if mode_changed
                         && unsafe {
                             SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None)
                         } == 0

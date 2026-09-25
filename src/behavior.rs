@@ -2,6 +2,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const IDLE_DECISION_INTERVAL: Duration = Duration::from_secs(3);
 const WALK_DECISION_INTERVAL: Duration = Duration::from_secs(2);
+const MIN_IDLE_PAUSE_MS: u64 = 1800;
+const IDLE_PAUSE_STEP_MS: u64 = 26;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -14,6 +16,9 @@ pub struct Behavior {
     decision_started: Instant,
     last_interaction: Instant,
     random_state: u64,
+    walk_right: bool,
+    walk_duration_ms: u16,
+    idle_decision_interval: Duration,
 }
 
 impl Behavior {
@@ -31,6 +36,9 @@ impl Behavior {
             decision_started: now,
             last_interaction: now,
             random_state: seed | 1,
+            walk_right: true,
+            walk_duration_ms: 0,
+            idle_decision_interval: IDLE_DECISION_INTERVAL,
         }
     }
 
@@ -38,9 +46,17 @@ impl Behavior {
         self.mode
     }
 
+    pub fn walk_right(&self) -> bool {
+        self.walk_right
+    }
+
+    pub fn walk_duration(&self) -> Duration {
+        Duration::from_millis(u64::from(self.walk_duration_ms))
+    }
+
     pub fn decision_interval(&self) -> Duration {
         match self.mode {
-            Mode::Idle => IDLE_DECISION_INTERVAL,
+            Mode::Idle => self.idle_decision_interval,
             Mode::Walk => WALK_DECISION_INTERVAL,
         }
     }
@@ -55,13 +71,32 @@ impl Behavior {
         let next = choose_next(self.mode, inactivity, self.next_percent());
         let changed = next != self.mode;
         self.mode = next;
+        if changed && next == Mode::Walk {
+            self.walk_right = self.next_percent() < 50;
+            // Keep each excursion shorter than the two-second walk decision window.
+            self.walk_duration_ms = 700 + (self.next_percent() * 10) as u16;
+        } else if next == Mode::Idle {
+            self.choose_idle_pause();
+        }
         changed
+    }
+
+    pub fn finish_walk(&mut self, now: Instant) {
+        self.mode = Mode::Idle;
+        self.decision_started = now;
+        self.choose_idle_pause();
     }
 
     pub fn reset_after_interaction(&mut self, now: Instant) {
         self.mode = Mode::Idle;
         self.decision_started = now;
         self.last_interaction = now;
+        self.choose_idle_pause();
+    }
+
+    fn choose_idle_pause(&mut self) {
+        let milliseconds = MIN_IDLE_PAUSE_MS + u64::from(self.next_percent()) * IDLE_PAUSE_STEP_MS;
+        self.idle_decision_interval = Duration::from_millis(milliseconds);
     }
 
     fn next_percent(&mut self) -> u32 {
@@ -125,6 +160,25 @@ mod tests {
         let released = now + IDLE_DECISION_INTERVAL + Duration::from_secs(1);
         behavior.reset_after_interaction(released);
         assert_eq!(behavior.mode(), Mode::Idle);
-        assert!(!behavior.tick(released + IDLE_DECISION_INTERVAL - Duration::from_millis(1)));
+        let pause = behavior.decision_interval();
+        assert!((1800..=4374).contains(&pause.as_millis()));
+        assert!(!behavior.tick(released + pause - Duration::from_millis(1)));
+    }
+
+    #[test]
+    fn idle_pause_varies_between_decisions() {
+        let now = Instant::now();
+        let mut pauses = std::collections::HashSet::new();
+        for seed in 1..20 {
+            let mut behavior = Behavior::with_seed(now, seed);
+            behavior.finish_walk(now);
+            pauses.insert(behavior.decision_interval());
+        }
+        assert!(pauses.len() > 1);
+        assert!(
+            pauses
+                .iter()
+                .all(|pause| (1800..=4374).contains(&pause.as_millis()))
+        );
     }
 }
