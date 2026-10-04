@@ -4,6 +4,7 @@ mod animation;
 mod asset;
 mod behavior;
 mod config;
+mod image_limits;
 
 use std::{
     ffi::c_void,
@@ -30,13 +31,14 @@ use windows_sys::Win32::{
     UI::{
         Input::KeyboardAndMouse::{GetDoubleClickTime, ReleaseCapture, SetCapture},
         WindowsAndMessaging::{
-            CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA,
-            GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW, GetWindowRect,
-            IDC_ARROW, KillTimer, LoadCursorW, MSG, PostQuitMessage, RegisterClassW, SM_CXDRAG,
-            SM_CYDRAG, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetTimer,
-            SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA,
-            UpdateLayeredWindow, WM_CAPTURECHANGED, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
-            WM_LBUTTONUP, WM_MOUSEMOVE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+            CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+            GWLP_USERDATA, GetCursorPos, GetMessageW, GetSystemMetrics, GetWindowLongPtrW,
+            GetWindowRect, IDC_ARROW, KillTimer, LoadCursorW, MB_ICONERROR, MB_OK, MSG,
+            MessageBoxW, PostQuitMessage, RegisterClassW, SM_CXDRAG, SM_CYDRAG, SW_SHOW,
+            SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetTimer, SetWindowLongPtrW, SetWindowPos,
+            ShowWindow, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_CAPTURECHANGED,
+            WM_DESTROY, WM_DISPLAYCHANGE, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MOUSEMOVE, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
             WS_EX_TOPMOST, WS_POPUP,
         },
     },
@@ -61,6 +63,18 @@ struct DragState {
     height: i32,
 }
 
+struct PetWindow(HWND);
+
+impl Drop for PetWindow {
+    fn drop(&mut self) {
+        // Clear the borrowed state pointer before destruction can dispatch messages.
+        unsafe {
+            SetWindowLongPtrW(self.0, GWLP_USERDATA, 0);
+            DestroyWindow(self.0);
+        }
+    }
+}
+
 struct PetState {
     drag: DragState,
     click_pending: bool,
@@ -68,6 +82,7 @@ struct PetState {
     scale: f32,
     width: i32,
     height: i32,
+    failure: Option<String>,
 }
 
 const ANIMATION_TIMER: usize = 1;
@@ -102,7 +117,19 @@ fn passed_drag_threshold(
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("Desktop Pet startup failed: {error}");
+        eprintln!("Desktop Pet failed: {error}");
+        let message = wide_null(&format!(
+            "Desktop Pet을 실행할 수 없거나 동작 중 오류가 발생했습니다.\n\n{error}"
+        ));
+        unsafe {
+            MessageBoxW(
+                null_mut(),
+                message.as_ptr(),
+                wide_null("Desktop Pet 오류").as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+        std::process::exit(1);
     }
 }
 
@@ -116,9 +143,7 @@ fn run() -> Result<(), String> {
         .first()
         .ok_or_else(|| format!("character pack '{}' has no idle frame", pack.id))?;
 
-    let image = image::open(first_frame)
-        .map_err(|error| format!("failed to decode {}: {error}", first_frame.display()))?
-        .to_rgba8();
+    let image = image_limits::decode_frame(first_frame, pack.config.scale)?;
     let image = scale_image(image, pack.config.scale)?;
 
     let (width, height) = image.dimensions();
@@ -194,10 +219,13 @@ fn run() -> Result<(), String> {
             scale: pack.config.scale,
             width,
             height,
+            failure: None,
         });
+        let _window = PetWindow(hwnd);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (&mut *state as *mut PetState) as isize);
 
         update_layered_window(hwnd, image.as_raw(), width, height)?;
+        recover_window_position(hwnd)?;
 
         ShowWindow(hwnd, SW_SHOW);
         if SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None) == 0 {
@@ -217,35 +245,21 @@ fn run() -> Result<(), String> {
             TranslateMessage(&message);
             DispatchMessageW(&message);
         }
+        if let Some(error) = state.failure.take() {
+            return Err(error);
+        }
     }
 
     Ok(())
 }
 
 fn scale_image(image: RgbaImage, scale: f32) -> Result<RgbaImage, String> {
+    let (width, height) = image_limits::scaled_dimensions(image.width(), image.height(), scale)?;
     if (scale - 1.0).abs() < f32::EPSILON {
         return Ok(image);
     }
 
-    let width = ((image.width() as f64) * f64::from(scale)).round();
-    let height = ((image.height() as f64) * f64::from(scale)).round();
-
-    if !width.is_finite()
-        || !height.is_finite()
-        || width < 1.0
-        || height < 1.0
-        || width > f64::from(u32::MAX)
-        || height > f64::from(u32::MAX)
-    {
-        return Err(format!("scale {scale} produces an invalid image size"));
-    }
-
-    Ok(resize(
-        &image,
-        width as u32,
-        height as u32,
-        FilterType::Nearest,
-    ))
+    Ok(resize(&image, width, height, FilterType::Nearest))
 }
 
 fn wide_null(value: &str) -> Vec<u16> {
@@ -253,6 +267,13 @@ fn wide_null(value: &str) -> Vec<u16> {
 }
 
 fn update_layered_window(hwnd: HWND, rgba: &[u8], width: i32, height: i32) -> Result<(), String> {
+    let byte_count = image_limits::frame_bytes(
+        u32::try_from(width).map_err(|_| "invalid DIB width")?,
+        u32::try_from(height).map_err(|_| "invalid DIB height")?,
+    )?;
+    if rgba.len() != byte_count {
+        return Err("RGBA buffer length does not match DIB dimensions".into());
+    }
     // SAFETY: All handles are created and released within this function, and the DIB buffer
     // is sized to exactly width * height * 4 bytes before it is exposed as a mutable slice.
     unsafe {
@@ -293,17 +314,30 @@ fn update_layered_window(hwnd: HWND, rgba: &[u8], width: i32, height: i32) -> Re
         );
 
         if bitmap.is_null() || bitmap_bits.is_null() {
+            if !bitmap.is_null() {
+                DeleteObject(bitmap as _);
+            }
             DeleteDC(memory_dc);
             ReleaseDC(null_mut(), screen_dc);
             return Err("CreateDIBSection failed".into());
         }
 
         let previous_object = SelectObject(memory_dc, bitmap as _);
+        if previous_object.is_null() || previous_object as isize == -1 {
+            DeleteObject(bitmap as _);
+            DeleteDC(memory_dc);
+            ReleaseDC(null_mut(), screen_dc);
+            return Err("SelectObject failed".into());
+        }
 
-        let pixel_count = (width * height) as usize;
-        let destination = std::slice::from_raw_parts_mut(bitmap_bits.cast::<u8>(), pixel_count * 4);
+        let destination = std::slice::from_raw_parts_mut(bitmap_bits.cast::<u8>(), byte_count);
 
-        for (src, dst) in rgba.chunks_exact(4).zip(destination.chunks_exact_mut(4)) {
+        for (src, dst) in rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(destination.as_chunks_mut::<4>().0.iter_mut())
+        {
             let alpha = src[3] as u16;
             dst[0] = ((src[2] as u16 * alpha + 127) / 255) as u8;
             dst[1] = ((src[1] as u16 * alpha + 127) / 255) as u8;
@@ -351,9 +385,7 @@ fn update_layered_window(hwnd: HWND, rgba: &[u8], width: i32, height: i32) -> Re
 
 fn render_frame(hwnd: HWND, state: &PetState) -> Result<(), String> {
     let frame = state.animation.frame();
-    let image = image::open(frame)
-        .map_err(|error| format!("failed to decode {}: {error}", frame.display()))?
-        .to_rgba8();
+    let image = image_limits::decode_frame(frame, state.scale)?;
     let mut image = scale_image(image, state.scale)?;
     if image.width() != state.width as u32 || image.height() != state.height as u32 {
         return Err(format!(
@@ -421,6 +453,57 @@ fn move_walk(hwnd: HWND, dx: i32) -> Result<bool, String> {
     }
 }
 
+fn recover_window_position(hwnd: HWND) -> Result<(), String> {
+    unsafe {
+        let mut rect: RECT = zeroed();
+        if GetWindowRect(hwnd, &mut rect) == 0 {
+            return Err("GetWindowRect failed during screen recovery".into());
+        }
+        let center = POINT {
+            x: rect.left.saturating_add((rect.right - rect.left) / 2),
+            y: rect.top.saturating_add((rect.bottom - rect.top) / 2),
+        };
+        let monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+        let mut info: MONITORINFO = zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if monitor.is_null() || GetMonitorInfoW(monitor, &mut info) == 0 {
+            return Err("GetMonitorInfoW failed during screen recovery".into());
+        }
+        let previous = (rect.left, rect.top);
+        clamp_rect_to_bounds(&mut rect, info.rcMonitor);
+        if previous != (rect.left, rect.top)
+            && SetWindowPos(
+                hwnd,
+                null_mut(),
+                rect.left,
+                rect.top,
+                0,
+                0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            ) == 0
+        {
+            return Err("SetWindowPos failed during screen recovery".into());
+        }
+    }
+    Ok(())
+}
+
+fn fail_runtime(hwnd: HWND, state: &mut PetState, error: String) {
+    state.failure = Some(error);
+    state.drag.active = false;
+    state.click_pending = false;
+    // Leave destruction and the error dialog to run()/main(), outside this callback.
+    unsafe {
+        KillTimer(hwnd, ANIMATION_TIMER);
+        KillTimer(hwnd, CLICK_TIMER);
+        PostQuitMessage(1);
+    }
+}
+
+fn timer_needs_update(mode_changed: bool, previous_ms: u32, next_ms: u32) -> bool {
+    mode_changed || previous_ms != next_ms
+}
+
 fn resume_idle(hwnd: HWND, state: &mut PetState) -> Result<(), String> {
     if state.animation.reset_idle(Instant::now()) {
         render_frame(hwnd, state)?;
@@ -478,10 +561,7 @@ fn clamp_rect_to_bounds(rect: &mut RECT, bounds: RECT) {
     let bounds_width = bounds.right - bounds.left;
     let bounds_height = bounds.bottom - bounds.top;
 
-    if width >= bounds_width {
-        rect.left = bounds.left;
-        rect.right = bounds.left + width;
-    } else if rect.left < bounds.left {
+    if width >= bounds_width || rect.left < bounds.left {
         rect.left = bounds.left;
         rect.right = bounds.left + width;
     } else if rect.right > bounds.right {
@@ -489,10 +569,7 @@ fn clamp_rect_to_bounds(rect: &mut RECT, bounds: RECT) {
         rect.left = bounds.right - width;
     }
 
-    if height >= bounds_height {
-        rect.top = bounds.top;
-        rect.bottom = bounds.top + height;
-    } else if rect.top < bounds.top {
+    if height >= bounds_height || rect.top < bounds.top {
         rect.top = bounds.top;
         rect.bottom = bounds.top + height;
     } else if rect.bottom > bounds.bottom {
@@ -532,6 +609,23 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     match message {
+        WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+            let state = unsafe { pet_state(hwnd) };
+            if !state.is_null() {
+                let result = recover_window_position(hwnd);
+                let state = unsafe { &mut *state };
+                let result = result.and_then(|()| {
+                    if !state.drag.active && !state.click_pending {
+                        resume_idle(hwnd, state)?;
+                    }
+                    Ok(())
+                });
+                if let Err(error) = result {
+                    fail_runtime(hwnd, state, error);
+                }
+            }
+            0
+        }
         WM_LBUTTONDOWN | WM_LBUTTONDBLCLK => {
             let state = unsafe { pet_state(hwnd) };
             if !state.is_null() {
@@ -566,7 +660,8 @@ unsafe extern "system" fn window_proc(
                                 .animation
                                 .start_reaction(Reaction::Dragged, Instant::now());
                             if let Err(error) = render_frame(hwnd, state) {
-                                eprintln!("Desktop Pet drag frame failed: {error}");
+                                fail_runtime(hwnd, state, error);
+                                return 0;
                             }
                         }
                         if !state.drag.moved {
@@ -583,7 +678,7 @@ unsafe extern "system" fn window_proc(
 
                         clamp_rect_to_cursor_monitor(&mut target_rect, cursor);
 
-                        unsafe {
+                        if unsafe {
                             SetWindowPos(
                                 hwnd,
                                 null_mut(),
@@ -593,7 +688,10 @@ unsafe extern "system" fn window_proc(
                                 0,
                                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                             )
-                        };
+                        } == 0
+                        {
+                            fail_runtime(hwnd, state, "SetWindowPos failed during drag".into());
+                        }
                     }
                 }
             }
@@ -623,7 +721,7 @@ unsafe extern "system" fn window_proc(
                         }
                     };
                     if let Err(error) = result {
-                        eprintln!("Desktop Pet interaction stopped: {error}");
+                        fail_runtime(hwnd, state, error);
                     }
                 }
             }
@@ -643,7 +741,7 @@ unsafe extern "system" fn window_proc(
                         resume_idle(hwnd, state)
                     };
                     if let Err(error) = result {
-                        eprintln!("Desktop Pet interaction stopped: {error}");
+                        fail_runtime(hwnd, state, error);
                     }
                 }
             }
@@ -659,7 +757,7 @@ unsafe extern "system" fn window_proc(
                     if !state.drag.active
                         && let Err(error) = play_reaction(hwnd, state, Reaction::Happy)
                     {
-                        eprintln!("Desktop Pet click reaction stopped: {error}");
+                        fail_runtime(hwnd, state, error);
                     }
                 }
             }
@@ -673,6 +771,7 @@ unsafe extern "system" fn window_proc(
                     return 0;
                 }
                 let now = Instant::now();
+                let previous_interval = state.animation.interval_ms();
                 let tick = state.animation.tick(now);
                 let mut redraw = tick.redraw;
                 let mut mode_changed = tick.mode_changed;
@@ -695,18 +794,20 @@ unsafe extern "system" fn window_proc(
                     if redraw {
                         render_frame(hwnd, state)?;
                     }
-                    if mode_changed
-                        && unsafe {
-                            SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None)
-                        } == 0
+                    if timer_needs_update(
+                        mode_changed,
+                        previous_interval,
+                        state.animation.interval_ms(),
+                    ) && unsafe {
+                        SetTimer(hwnd, ANIMATION_TIMER, state.animation.interval_ms(), None)
+                    } == 0
                     {
                         return Err("SetTimer failed".into());
                     }
                     Ok(())
                 })();
                 if let Err(error) = result {
-                    unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
-                    eprintln!("Desktop Pet animation stopped: {error}");
+                    fail_runtime(hwnd, state, error);
                 }
             }
             0
@@ -715,7 +816,11 @@ unsafe extern "system" fn window_proc(
             unsafe { KillTimer(hwnd, ANIMATION_TIMER) };
             unsafe { KillTimer(hwnd, CLICK_TIMER) };
             // SAFETY: Posting WM_QUIT does not dereference any caller-provided pointer.
-            unsafe { PostQuitMessage(0) };
+            // Guard cleanup happens after the message loop; do not leave another
+            // WM_QUIT that would immediately dismiss the subsequent error dialog.
+            if !unsafe { pet_state(hwnd) }.is_null() {
+                unsafe { PostQuitMessage(0) };
+            }
             0
         }
         _ => {
@@ -730,6 +835,116 @@ mod tests {
     use super::*;
     use image::GenericImageView;
     use windows_sys::Win32::UI::WindowsAndMessaging::DestroyWindow;
+
+    #[test]
+    fn invalid_pixel_buffers_are_rejected_before_gdi_access() {
+        assert!(update_layered_window(null_mut(), &[0; 3], 1, 1).is_err());
+        assert!(update_layered_window(null_mut(), &[], -1, 1).is_err());
+        assert!(update_layered_window(null_mut(), &[], 50_000, 50_000).is_err());
+    }
+
+    #[test]
+    fn recovery_moves_a_hidden_window_back_inside_a_real_monitor() {
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                wide_null("STATIC").as_ptr(),
+                wide_null("Recovery test").as_ptr(),
+                WS_POPUP,
+                -100_000,
+                100_000,
+                96,
+                96,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            assert!(!hwnd.is_null());
+            let _window = PetWindow(hwnd);
+            recover_window_position(hwnd).unwrap();
+            let mut rect: RECT = zeroed();
+            assert_ne!(GetWindowRect(hwnd, &mut rect), 0);
+            let monitor = MonitorFromPoint(
+                POINT {
+                    x: rect.left + 48,
+                    y: rect.top + 48,
+                },
+                MONITOR_DEFAULTTONEAREST,
+            );
+            let mut info: MONITORINFO = zeroed();
+            info.cbSize = size_of::<MONITORINFO>() as u32;
+            assert_ne!(GetMonitorInfoW(monitor, &mut info), 0);
+            assert!(rect.left >= info.rcMonitor.left && rect.right <= info.rcMonitor.right);
+            assert!(rect.top >= info.rcMonitor.top && rect.bottom <= info.rcMonitor.bottom);
+            recover_window_position(hwnd).unwrap();
+            let mut second: RECT = zeroed();
+            GetWindowRect(hwnd, &mut second);
+            assert_eq!((rect.left, rect.top), (second.left, second.top));
+        }
+    }
+
+    #[test]
+    fn window_guard_destroys_the_native_window_on_early_return() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::IsWindow;
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                wide_null("STATIC").as_ptr(),
+                wide_null("Cleanup test").as_ptr(),
+                WS_POPUP,
+                200,
+                200,
+                96,
+                96,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null_mut(),
+            );
+            assert!(!hwnd.is_null());
+            drop(PetWindow(hwnd));
+            assert_eq!(IsWindow(hwnd), 0);
+        }
+    }
+
+    #[test]
+    fn guard_cleanup_does_not_post_quit_before_the_error_dialog() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PM_REMOVE, PeekMessageW, WM_QUIT};
+        unsafe {
+            let class_name = wide_null("DesktopPet cleanup regression");
+            let mut class: WNDCLASSW = zeroed();
+            class.lpfnWndProc = Some(window_proc);
+            class.hInstance = GetModuleHandleW(null());
+            class.lpszClassName = class_name.as_ptr();
+            assert_ne!(RegisterClassW(&class), 0);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class_name.as_ptr(),
+                class_name.as_ptr(),
+                WS_POPUP,
+                200,
+                200,
+                96,
+                96,
+                null_mut(),
+                null_mut(),
+                class.hInstance,
+                null_mut(),
+            );
+            assert!(!hwnd.is_null());
+            drop(PetWindow(hwnd));
+            let mut message: MSG = zeroed();
+            assert_eq!(
+                PeekMessageW(&mut message, null_mut(), WM_QUIT, WM_QUIT, PM_REMOVE),
+                0
+            );
+            windows_sys::Win32::UI::WindowsAndMessaging::UnregisterClassW(
+                class_name.as_ptr(),
+                class.hInstance,
+            );
+        }
+    }
 
     #[test]
     fn click_double_click_and_drag_have_distinct_release_actions() {
@@ -819,6 +1034,7 @@ mod tests {
             scale: 1.0,
             width: width as i32,
             height: height as i32,
+            failure: None,
         });
 
         unsafe {

@@ -26,6 +26,7 @@ pub enum Reaction {
 
 pub struct Animation {
     idle: Motion,
+    idle_frame_durations_ms: Vec<u32>,
     walk: Motion,
     happy: Motion,
     special: Motion,
@@ -71,6 +72,7 @@ impl Animation {
             })
         };
         Ok(Self {
+            idle_frame_durations_ms: idle.config.frame_durations_ms.clone(),
             idle: Motion {
                 frames: idle.frames.clone(),
                 fps: idle.config.fps,
@@ -209,6 +211,19 @@ impl Animation {
         if self.behavior.mode() == Mode::Idle && self.idle.frames.len() == 1 {
             return self.behavior.decision_interval().as_millis() as u32;
         }
+        if self.behavior.mode() == Mode::Idle && !self.idle_frame_durations_ms.is_empty() {
+            let (_, remaining) = timed_frame(
+                self.last_tick.duration_since(self.mode_started),
+                &self.idle_frame_durations_ms,
+                self.idle.looped,
+            );
+            return remaining.min(
+                self.behavior
+                    .decision_remaining(self.last_tick)
+                    .as_millis()
+                    .max(1) as u32,
+            );
+        }
         let frame_ms = (1000 / u32::from(self.motion().fps)).max(1);
         if self.behavior.mode() == Mode::Walk {
             frame_ms.min(33)
@@ -271,12 +286,17 @@ impl Animation {
         }
 
         let elapsed = now.duration_since(self.mode_started);
-        let next_frame = frame_index(
-            elapsed,
-            self.motion().fps,
-            self.motion().frames.len(),
-            self.motion().looped,
-        );
+        let next_frame =
+            if self.behavior.mode() == Mode::Idle && !self.idle_frame_durations_ms.is_empty() {
+                timed_frame(elapsed, &self.idle_frame_durations_ms, self.idle.looped).0
+            } else {
+                frame_index(
+                    elapsed,
+                    self.motion().fps,
+                    self.motion().frames.len(),
+                    self.motion().looped,
+                )
+            };
         let redraw = mode_changed || next_frame != self.frame_index;
         self.frame_index = next_frame;
 
@@ -311,6 +331,22 @@ impl Animation {
     }
 }
 
+fn timed_frame(elapsed: Duration, durations: &[u32], looped: bool) -> (usize, u32) {
+    let total: u128 = durations.iter().map(|duration| u128::from(*duration)).sum();
+    let elapsed = elapsed.as_millis();
+    if !looped && elapsed >= total {
+        return (durations.len() - 1, durations[durations.len() - 1]);
+    }
+    let mut phase = elapsed % total;
+    for (index, duration) in durations.iter().enumerate() {
+        if phase < u128::from(*duration) {
+            return (index, *duration - phase as u32);
+        }
+        phase -= u128::from(*duration);
+    }
+    unreachable!("validated idle timeline must contain the phase");
+}
+
 fn frame_index(elapsed: Duration, fps: u16, count: usize, looped: bool) -> usize {
     let index = elapsed.as_millis() * u128::from(fps) / 1000;
     if looped {
@@ -334,6 +370,7 @@ mod tests {
 
     fn test_animation(now: Instant, seed: u64) -> Animation {
         Animation {
+            idle_frame_durations_ms: Vec::new(),
             idle: test_motion("idle", 4),
             walk: test_motion("walk", 8),
             happy: test_motion("happy", 6),
@@ -364,6 +401,57 @@ mod tests {
     }
 
     #[test]
+    fn timed_idle_holds_rest_then_closes_and_reopens_without_delaying_behavior() {
+        let now = Instant::now();
+        let mut animation = test_animation(now, 1);
+        animation.idle.frames = vec!["rest".into(), "closed".into()];
+        animation.idle_frame_durations_ms = vec![5000, 80];
+        assert_eq!(animation.interval_ms(), 4500);
+        assert_eq!(
+            timed_frame(Duration::from_millis(4999), &[5000, 80], true),
+            (0, 1)
+        );
+        assert_eq!(
+            timed_frame(Duration::from_millis(5000), &[5000, 80], true),
+            (1, 80)
+        );
+        assert_eq!(
+            timed_frame(Duration::from_millis(5079), &[5000, 80], true),
+            (1, 1)
+        );
+        assert_eq!(
+            timed_frame(Duration::from_millis(5080), &[5000, 80], true),
+            (0, 5000)
+        );
+        assert_eq!(
+            timed_frame(Duration::from_millis(6000), &[5000, 80], false),
+            (1, 80)
+        );
+    }
+
+    #[test]
+    fn single_frame_idle_rearms_timer_without_a_mode_change() {
+        let now = Instant::now();
+        let mut animation = test_animation(now, 4);
+        let previous = animation.interval_ms();
+        let first_decision = now + Duration::from_millis(4500);
+        let tick = animation.tick(first_decision);
+        assert!(!tick.mode_changed);
+        assert_eq!(animation.interval_ms(), 6249);
+        assert!(crate::timer_needs_update(
+            tick.mode_changed,
+            previous,
+            animation.interval_ms()
+        ));
+        let deadline = first_decision + Duration::from_millis(6249);
+        animation.tick(deadline - Duration::from_millis(1));
+        assert_eq!(animation.interval_ms(), 6249);
+        animation.tick(deadline);
+        assert_eq!(animation.interval_ms(), 4143);
+        assert!(!crate::timer_needs_update(false, 4143, 4143));
+    }
+
+    #[test]
     fn weighted_transition_still_moves_and_returns_to_idle() {
         let now = Instant::now();
         let seed = (1..10_000)
@@ -371,7 +459,7 @@ mod tests {
                 let mut behavior = Behavior::with_seed(now, *seed);
                 behavior.tick(now + Duration::from_millis(4500));
                 behavior.mode() == Mode::Walk
-                    && behavior.tick(now + Duration::from_millis(6500))
+                    && behavior.tick(now + Duration::from_millis(8500))
                     && behavior.mode() == Mode::Idle
             })
             .unwrap();
@@ -386,7 +474,7 @@ mod tests {
         assert_ne!(animation.tick(now + Duration::from_millis(4600)).dx, 0);
         assert!(
             animation
-                .tick(now + Duration::from_millis(6500))
+                .tick(now + Duration::from_millis(8500))
                 .mode_changed
         );
         assert_eq!(animation.frame(), Path::new("idle"));
@@ -432,13 +520,13 @@ mod tests {
                 .mode_changed
         );
         let chosen_distance = animation.walk_remaining;
-        assert!((63..=153).contains(&chosen_distance));
+        assert!((126..=304).contains(&chosen_distance));
 
-        let arrival = animation.tick(now + Duration::from_millis(6400));
+        let arrival = animation.tick(now + Duration::from_millis(8000));
         assert!(arrival.mode_changed);
         assert_eq!(arrival.dx.abs(), chosen_distance);
         assert_eq!(animation.frame(), Path::new("idle"));
-        assert_eq!(animation.tick(now + Duration::from_millis(6500)).dx, 0);
+        assert_eq!(animation.tick(now + Duration::from_millis(8100)).dx, 0);
     }
 
     #[test]

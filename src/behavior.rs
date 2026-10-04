@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const IDLE_DECISION_INTERVAL: Duration = Duration::from_millis(4500);
-const WALK_DECISION_INTERVAL: Duration = Duration::from_secs(2);
+const WALK_DECISION_INTERVAL: Duration = Duration::from_secs(4);
 const MIN_IDLE_PAUSE_MS: u64 = 2700;
 const IDLE_PAUSE_STEP_MS: u64 = 39;
 
@@ -61,6 +61,11 @@ impl Behavior {
         }
     }
 
+    pub fn decision_remaining(&self, now: Instant) -> Duration {
+        self.decision_interval()
+            .saturating_sub(now.duration_since(self.decision_started))
+    }
+
     pub fn tick(&mut self, now: Instant) -> bool {
         if now.duration_since(self.decision_started) < self.decision_interval() {
             return false;
@@ -73,8 +78,8 @@ impl Behavior {
         self.mode = next;
         if changed && next == Mode::Walk {
             self.walk_right = self.next_percent() < 50;
-            // Keep each excursion shorter than the two-second walk decision window.
-            self.walk_duration_ms = 700 + (self.next_percent() * 10) as u16;
+            // Keep each excursion shorter than the four-second walk decision window.
+            self.walk_duration_ms = 1400 + (self.next_percent() * 20) as u16;
         } else if next == Mode::Idle {
             self.choose_idle_pause();
         }
@@ -180,5 +185,26 @@ mod tests {
                 .iter()
                 .all(|pause| (2700..=6561).contains(&pause.as_millis()))
         );
+    }
+
+    #[test]
+    fn longer_walks_are_not_interrupted_at_the_previous_two_second_window() {
+        let now = Instant::now();
+        let started = now + IDLE_DECISION_INTERVAL;
+        let seed = (1..10_000)
+            .find(|seed| {
+                let mut behavior = Behavior::with_seed(now, *seed);
+                behavior.tick(started);
+                behavior.mode() == Mode::Walk && behavior.walk_duration() > Duration::from_secs(2)
+            })
+            .unwrap();
+        let mut behavior = Behavior::with_seed(now, seed);
+        assert!(behavior.tick(started));
+        let duration = behavior.walk_duration();
+        assert!((1400..=3380).contains(&duration.as_millis()));
+        assert_eq!(duration.as_millis() % 20, 0);
+        assert!(!behavior.tick(started + Duration::from_secs(2)));
+        assert_eq!(behavior.mode(), Mode::Walk);
+        assert_eq!(behavior.walk_duration(), duration);
     }
 }

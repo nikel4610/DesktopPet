@@ -68,10 +68,18 @@ impl CharacterPack {
                 continue;
             }
 
+            let motion_config = config.motion_or_default(motion_name);
+            if !motion_config.frame_durations_ms.is_empty()
+                && motion_config.frame_durations_ms.len() != frames.len()
+            {
+                return Err(format!(
+                    "motion '{motion_name}' frame_durations_ms count must match its PNG frames"
+                ));
+            }
             motions.insert(
                 motion_name.to_string(),
                 MotionAssets {
-                    config: config.motion_or_default(motion_name),
+                    config: motion_config,
                     frames,
                 },
             );
@@ -93,6 +101,7 @@ impl CharacterPack {
                 first_idle.display()
             )
         })?;
+        crate::image_limits::scaled_dimensions(expected_size.0, expected_size.1, config.scale)?;
         for (motion_name, motion) in &motions {
             for frame in &motion.frames {
                 let size = image::image_dimensions(frame).map_err(|error| {

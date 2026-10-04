@@ -23,6 +23,8 @@ pub struct MotionConfig {
     pub looped: bool,
     #[serde(default)]
     pub speed: Option<f32>,
+    #[serde(default)]
+    pub frame_durations_ms: Vec<u32>,
 }
 
 impl MotionConfig {
@@ -32,21 +34,25 @@ impl MotionConfig {
                 fps: 8,
                 looped: true,
                 speed: Some(90.0),
+                frame_durations_ms: Vec::new(),
             },
             "dragged" => Self {
                 fps: 1,
                 looped: true,
                 speed: None,
+                frame_durations_ms: Vec::new(),
             },
             "happy" | "look" | "wake" | "land" | "special" => Self {
                 fps: 6,
                 looped: false,
                 speed: None,
+                frame_durations_ms: Vec::new(),
             },
             _ => Self {
                 fps: 4,
                 looped: true,
                 speed: None,
+                frame_durations_ms: Vec::new(),
             },
         }
     }
@@ -54,6 +60,22 @@ impl MotionConfig {
     fn validate(&self, name: &str) -> Result<(), String> {
         if self.fps == 0 {
             return Err(format!("motion '{name}' fps must be greater than 0"));
+        }
+
+        if !self.frame_durations_ms.is_empty() {
+            if name != "idle" || self.frame_durations_ms.contains(&0) {
+                return Err(
+                    "frame_durations_ms supports idle only and must contain positive values".into(),
+                );
+            }
+            let total: u64 = self
+                .frame_durations_ms
+                .iter()
+                .map(|value| u64::from(*value))
+                .sum();
+            if total > u64::from(u32::MAX) {
+                return Err("idle frame duration total is too large".into());
+            }
         }
 
         if let Some(speed) = self.speed
@@ -204,6 +226,21 @@ mod tests {
         assert!(matches!(config.default_facing, Facing::Right));
         assert_eq!(config.motion_or_default("walk").fps, 8);
         assert_eq!(config.motion_or_default("walk").speed, Some(90.0));
+    }
+
+    #[test]
+    fn idle_timing_rejects_zero_and_non_idle_sequences() {
+        for source in [
+            "name='Test'\n[idle]\nframe_durations_ms=[2000,0]",
+            "name='Test'\n[walk]\nframe_durations_ms=[2000,60]",
+            "name='Test'\n[idle]\nframe_durations_ms=[4294967295,1]",
+        ] {
+            let config: CharacterConfig = toml::from_str(source).unwrap();
+            assert!(config.validate().is_err());
+        }
+        let config: CharacterConfig =
+            toml::from_str("name='Test'\n[idle]\nframe_durations_ms=[2000,60,80,60]").unwrap();
+        assert!(config.validate().is_ok());
     }
 
     #[test]
