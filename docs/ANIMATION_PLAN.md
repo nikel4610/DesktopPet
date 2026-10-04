@@ -1,6 +1,6 @@
 # Nate 애니메이션 점검과 제작 계획
 
-현재 실행 팩은 `local-assets/nate-animation-review/current-characters/nate-v7`다. 사용자가 선택한 **A idle은 몸과 시선 고정·눈 깜빡임만**를 사용한다. walk는 수용한 **8개 핵심 자세에 중간 다리 자세를 넣은 16장·16 FPS**이며 1초 보행 주기와 90픽셀/초를 유지한다. 이전 8장 팩은 `_nate-v6`로 보관한다. 아래 내용은 이전 제작과 검증 기록을 포함한다.
+현재 실행 팩은 `local-assets/nate-animation-review/current-characters/nate-v7`다. 사용자가 선택한 **A idle은 몸과 시선 고정·눈 깜빡임만**를 사용한다. walk는 수용한 **8개 핵심 자세에 중간 다리 자세를 넣은 16장·16 FPS**이며 1초 보행 주기와 90픽셀/초를 유지한다. 이전 팩과 중간 이미지는 사용자 요청으로 삭제했다. 최종 미리보기는 `local-assets/nate-animation-review/preview-final.html`, 출처·프롬프트는 `PROVENANCE.md`다. 아래 내용은 이전 제작과 검증 이력이며 과거 파일 경로는 현재 존재하지 않을 수 있다.
 
 ## 확정한 표시 크기
 

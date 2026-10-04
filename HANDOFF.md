@@ -17,11 +17,11 @@
 - idle: 4장, 유지 시간 `[6300,60,80,60]` ms. 몸·시선은 고정하고 눈만 깜빡인다.
 - walk: 16장·16 FPS, 속도 90픽셀/초, 보행 그림 주기 약 1초. 한 번의 목표 걷는 시간은 약 1.4~3.38초다.
 - 현재 팩에는 `idle`·`walk` 폴더만 있다. `happy`·`special`·`dragged`·`fall`·`land`는 idle로 대체한다. 입력 처리 자체는 기존 엔진에 남아 있다.
-- 같은 실행 루트의 `_nate-v3`~`_nate-v6`는 이전 팩이다. 밑줄 폴더는 자동 선택에서 제외된다.
+- 사용자 요청으로 이전 팩과 중간 제작본을 삭제했다. 실행 루트에는 최종 `nate-v7` 하나만 남아 있다.
 
 **최종 Nate 이미지와 제작 자료는 Git 제외 로컬 파일이다. GitHub만 clone하면 이 팩은 없다.** 다른 컴퓨터로 옮길 때는 위 로컬 팩을 별도로 복사해야 한다. 이번 인수인계에서도 이미지의 Git 제외 방침을 바꾸지 않았다. 기본 `assets/characters/default`는 Nate 최종본이 아니다.
 
-최종 걷기 전체 시트는 `local-assets/nate-animation-review/walk16-frame14-join-fixed-full.png`, 재생 비교는 `walk16-frame14-join-fixed-preview.html`, 마지막 픽셀 수정 전후는 `frame14-pinholes-before-after.png`다. 이전 미리보기와 중간 후보가 여럿 있으므로 이름이 비슷한 파일을 최종본으로 착각하지 않는다. 현재 파일 무결성 기준은 `docs/FINAL_PACK_SHA256.txt`에 남긴다.
+최종 걷기 전체 시트는 `local-assets/nate-animation-review/walk16-frame14-join-fixed-full.png`, 최종 팩을 직접 읽는 미리보기는 `preview-final.html`, 마지막 픽셀 수정 전후는 `frame14-pinholes-before-after.png`다. 제작 출처와 전체 프롬프트는 같은 폴더의 `PROVENANCE.md`로 합쳤다. 이전 비교 HTML/APNG·중간 이미지·임시 검사 폴더는 삭제했다. 현재 파일 무결성 기준은 `docs/FINAL_PACK_SHA256.txt`이며 정리 전후 최종 팩 21개 파일의 해시가 일치한다.
 
 ## 실행과 종료
 
